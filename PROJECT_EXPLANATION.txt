@@ -1,0 +1,127 @@
+용해탱크 KPI MLOps Serving 프로젝트 설명
+========================================
+
+1. 프로젝트 개요
+
+이 프로젝트는 용해탱크 센서 데이터를 이용해 다음 1분의 NG 발생 여부를 예측하고,
+승인된 머신러닝 모델을 API로 제공하는 MLOps 서빙 시스템입니다.
+
+현재 1분 동안 수집한 센서값 10개를 입력으로 사용합니다.
+
+- MELT_TEMP
+- MOTORSPEED
+- MELT_WEIGHT
+
+LSTM 모델이 다음 1분의 NG 발생 확률을 계산하고, 설정된 임계값에 따라 NG 또는 OK를
+반환합니다.
+
+2. 전체 처리 흐름
+
+센서값 10개
+  -> FastAPI /predict
+  -> 입력값 검증
+  -> scaler.joblib로 스케일링
+  -> model.keras 추론
+  -> NG 확률 및 임계값 판정
+  -> SQLite에 예측 이력 저장
+  -> API 응답 및 대시보드 표시
+
+모델은 이 프로젝트에서 직접 재학습하지 않습니다. artifacts/에 있는 모델 번들을
+읽어서 추론만 수행합니다.
+
+필수 모델 파일은 다음 네 가지입니다.
+
+- model.keras: 학습된 Keras 모델
+- scaler.joblib: 입력 스케일러
+- model_config.json: 특성, 시퀀스 길이, 임계값 등의 설정
+- metrics.json: 평가 결과와 배포 승인 여부
+
+metrics.json의 deployment_approved가 true가 아니면 기본적으로 모델 서빙을 차단합니다.
+
+3. 주요 API
+
+- /healthz: 애플리케이션 프로세스가 실행 중인지 확인
+- /readyz: 모델이 정상 로드되었고 배포 승인 상태인지 확인
+- /status: 모델 로드 여부, 승인 여부, 임계값, 오류 정보 확인
+- /predict: 센서값 10개를 받아 다음 1분 NG 예측
+- /dashboard: 예측 현황 웹 대시보드
+- /dashboard/data: 대시보드용 최근 예측 및 통계 데이터
+- /docs: FastAPI 자동 생성 API 문서
+
+/healthz는 서버 생존 확인용이고, /readyz는 실제 모델 서빙 가능 여부를 확인합니다.
+따라서 모델이 없거나 승인되지 않은 경우 서버는 실행 중이어도 /readyz가 503을
+반환할 수 있습니다.
+
+4. 대시보드
+
+app/dashboard.html은 Plotly를 사용하는 모니터링 화면입니다.
+
+다음 항목을 표시합니다.
+
+- 서빙 상태
+- 최근 요청 수
+- NG 예측 건수
+- 평균 추론 지연시간
+- 최근 NG 확률과 임계값 그래프
+
+대시보드는 10초마다 /dashboard/data를 호출하여 화면을 갱신합니다.
+
+5. 로컬 실행
+
+다음 명령으로 로컬에서 실행할 수 있습니다.
+
+python -m pip install -e ".[dev]"
+python -m pytest
+python -m uvicorn app.main:app --reload
+
+Docker Compose 실행:
+
+docker compose up --build -d
+
+기본 주소는 http://localhost:8000입니다.
+
+6. AWS 배포 구조
+
+GitHub Actions
+  -> OIDC를 통한 AWS IAM Role 인증
+  -> ECR 이미지 저장소
+  -> ECS Fargate
+  -> ALB
+  -> FastAPI 서비스
+
+모델 번들은 S3의 models/approved/ 경로에서 내려받을 수 있고, Docker 이미지는 ECR에
+저장됩니다. GitHub Actions는 장기 AWS Access Key 대신 OIDC를 통해 임시 AWS 권한을
+사용합니다.
+
+배포 과정은 다음과 같습니다.
+
+1) 코드 체크아웃
+2) Python 환경 구성
+3) Ruff 검사 및 pytest 실행
+4) AWS OIDC 인증
+5) ECR 이미지 빌드 및 Push
+6) ECS Task Definition의 이미지 교체
+7) ECS 서비스 배포
+8) /healthz 및 /readyz 확인
+
+배포 워크플로는 v*.*.* 형식의 버전 태그를 대상으로 합니다. 예를 들어 v1.2.3
+태그를 Push하면 배포 워크플로가 실행됩니다.
+
+7. 버전별 책임
+
+- v1: Notebook 기반 데이터 이해, LSTM 기준 모델, 평가
+- v2: Python 학습 파이프라인, MLflow, KPI 승인 판정
+- v3: 승인 모델 계약 검증, FastAPI, SQLite, Docker
+- v4: AWS 인프라, 컨테이너 배포, GitHub Actions CI/CD
+
+학습과 임계값 선택은 modeling 프로젝트의 책임이고, 이 프로젝트는 승인된 모델을
+서빙하는 역할을 담당합니다.
+
+8. 현재 구조의 한계
+
+- 예측 이력은 SQLite에 저장되므로 ECS Task가 교체되면 사라집니다.
+- ALB가 HTTP로 구성되어 있어 실제 공개 운영에서는 HTTPS와 ACM 인증서가 필요합니다.
+- AWS 환경에서는 승인된 모델만 서빙하도록 설정됩니다.
+- ALLOW_UNAPPROVED_MODEL=true는 로컬 검증용 예외 설정입니다.
+- 실제 운영에서는 SQLite를 RDS, DynamoDB 또는 외부 로그 저장소로 분리하는 것이
+  적절합니다.
